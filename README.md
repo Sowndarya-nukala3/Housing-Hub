@@ -1,4 +1,4 @@
-# Housing Hub — Smart Wallet release
+# Housing Hub — Smart Housing Management
 
 Household management for web and mobile using Python FastAPI, SQLAlchemy, SQLite (default) or MySQL, and React Native / Expo.
 
