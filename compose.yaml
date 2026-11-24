@@ -1,0 +1,12 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: housing
+      MYSQL_USER: housing
+      MYSQL_PASSWORD: localdevpassword
+      MYSQL_ROOT_PASSWORD: localrootpassword
+    ports: ['3307:3306']
+    volumes: [housing_data:/var/lib/mysql]
+volumes:
+  housing_data:
