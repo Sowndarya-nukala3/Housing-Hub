@@ -57,7 +57,7 @@ def hubs(u=Depends(user)):
 @app.post('/hubs')
 def create(a:Item,u=Depends(user)):
  if not a.name.strip(): fail('Name required')
- if len(query('SELECT id FROM hubs WHERE owner=:u',u=u))>=4: fail('Four hub limit')
+ if len(query('SELECT id FROM hubs WHERE owner=:u',u=u))>=10: fail('Ten hub limit')
  validate_plan(a)
  h=uid()
  with engine.begin() as c:
@@ -83,8 +83,12 @@ def join(t:str,u=Depends(user)):
  if not r or r['expires']<str(date.today()): fail('Invalid or expired invitation')
  h=r['hub']; owner=one('SELECT owner FROM hubs WHERE id=:h',h=h)['owner']
  if owner==u or one('SELECT * FROM members WHERE hub=:h AND user_id=:u',h=h,u=u): return {'id':h}
- if len(query('SELECT * FROM members WHERE hub=:h',h=h))>=6: fail('Six guest limit')
- query('INSERT INTO members VALUES (:h,:u)',h=h,u=u); return {'id':h}
+ if len(query('SELECT * FROM members WHERE hub=:h',h=h))>=12: fail('Twelve guest limit')
+ from datetime import datetime, timezone
+ with engine.begin() as c:
+  c.execute(text('INSERT INTO members VALUES (:h,:u)'),dict(h=h,u=u))
+  c.execute(text('INSERT INTO membership_starts VALUES (:h,:u,:t)'),dict(h=h,u=u,t=datetime.now(timezone.utc).isoformat()))
+ return {'id':h}
 @app.get('/hubs/{h}')
 def board(h:str,u=Depends(user)):
  master=access(h,u); tasks=query('SELECT tasks.*,categories.name,categories.icon FROM tasks JOIN categories ON tasks.category=categories.id WHERE tasks.hub=:h'+('' if master else ' AND assignee=:u'),h=h,u=u)
@@ -93,6 +97,18 @@ def board(h:str,u=Depends(user)):
 # V3 additive migration: existing household records remain intact.
 with engine.begin() as c:
  c.execute(text('CREATE TABLE IF NOT EXISTS messages (id VARCHAR(64) PRIMARY KEY, hub VARCHAR(64), sender VARCHAR(64), recipient VARCHAR(64), body VARCHAR(1000), sent VARCHAR(40))'))
+with engine.begin() as c:
+ c.execute(text('CREATE TABLE IF NOT EXISTS membership_starts (hub VARCHAR(64), user_id VARCHAR(64), joined VARCHAR(40), PRIMARY KEY(hub,user_id))'))
+@app.delete('/hubs/{h}/members/{member}')
+def remove_member(h:str,member:str,u=Depends(user)):
+ access(h,u,True)
+ if member==u: fail('Cannot remove owner')
+ with engine.begin() as c:
+  p=dict(h=h,m=member)
+  if not c.execute(text('DELETE FROM members WHERE hub=:h AND user_id=:m'),p).rowcount: fail('Member not found',404)
+  c.execute(text('DELETE FROM membership_starts WHERE hub=:h AND user_id=:m'),p)
+  c.execute(text('DELETE FROM invites WHERE hub=:h'),p)
+ return {'ok':True}
 class Profile(BaseModel):
  name:str
 class Message(BaseModel):
@@ -110,12 +126,12 @@ def edit_profile(a:Profile,u=Depends(user)):
 @app.get('/hubs/{h}/messages')
 def messages(h:str,u=Depends(user)):
  access(h,u)
- return query('SELECT messages.*, users.name AS sender_name FROM messages JOIN users ON users.id=messages.sender WHERE hub=:h AND (sender=:u OR recipient=:u) ORDER BY sent,id',h=h,u=u)
+ start=one('SELECT joined FROM membership_starts WHERE hub=:h AND user_id=:u',h=h,u=u)
+ return query("SELECT messages.*, users.name AS sender_name FROM messages JOIN users ON users.id=messages.sender WHERE hub=:h AND (sender=:u OR recipient=:u OR recipient='group') AND sent>=:t ORDER BY sent,id",h=h,u=u,t=start['joined'] if start else '')
 @app.post('/hubs/{h}/messages')
 def send_message(h:str,a:Message,u=Depends(user)):
  master=access(h,u); owner=one('SELECT owner FROM hubs WHERE id=:h',h=h)['owner']
- if a.recipient==u or (not master and a.recipient!=owner): fail('Invalid recipient',403)
- if master and not one('SELECT user_id FROM members WHERE hub=:h AND user_id=:u',h=h,u=a.recipient): fail('Invalid recipient',403)
+ if a.recipient==u or (a.recipient!='group' and a.recipient not in residents(h)): fail('Invalid recipient',403)
  body=a.body.strip()
  if not 1<=len(body)<=1000: fail('Message must contain 1–1000 characters')
  from datetime import datetime, timezone
@@ -219,10 +235,10 @@ def residents(h):
 def ledger(h:str,u=Depends(user)):
  access(h,u); names=residents(h); balances={k:0 for k in names}; expenses=query('SELECT * FROM expenses WHERE hub=:h',h=h); settlements=query('SELECT * FROM settlements WHERE hub=:h',h=h)
  for e in expenses:
-  e['shares']=query('SELECT * FROM expense_shares WHERE expense=:i',i=e['id']); balances[e['payer']]+=e['cents']
-  for x in e['shares']: balances[x['member']]-=x['cents']
- for x in settlements: balances[x['sender']]+=x['cents']; balances[x['recipient']]-=x['cents']
- return dict(expenses=expenses,settlements=settlements,balances=[dict(id=k,name=names[k],cents=v) for k,v in balances.items()])
+  e['shares']=query('SELECT * FROM expense_shares WHERE expense=:i',i=e['id']); balances[e['payer']]=balances.get(e['payer'],0)+e['cents']
+  for x in e['shares']: balances[x['member']]=balances.get(x['member'],0)-x['cents']
+ for x in settlements: balances[x['sender']]=balances.get(x['sender'],0)+x['cents']; balances[x['recipient']]=balances.get(x['recipient'],0)-x['cents']
+ return dict(expenses=expenses,settlements=settlements,balances=[dict(id=k,name=names.get(k,'Former member'),cents=v) for k,v in balances.items()])
 @app.post('/hubs/{h}/ledger/expense')
 def expense(h:str,a:Expense,u=Depends(user)):
  access(h,u,True); names=residents(h)
